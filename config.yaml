@@ -1,0 +1,3 @@
+listen_password: 1337pass
+listen_port: 12346
+control_port: 12345

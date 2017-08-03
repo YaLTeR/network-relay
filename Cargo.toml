@@ -1,0 +1,18 @@
+[package]
+name = "network-relay"
+version = "0.1.0"
+authors = ["Ivan Molodetskikh <yalterz@gmail.com>"]
+
+[profile.release]
+lto = true
+
+[dependencies]
+bytes = "0.4"
+error-chain = "0.10"
+futures = "0.1"
+rand = "0.3"
+serde = "1"
+serde_derive = "1"
+serde_yaml = "0.7"
+tokio-core = "0.1"
+tokio-io = "0.1"
