@@ -3,7 +3,7 @@ use std::ops::Deref;
 use std::rc::Rc;
 
 use error_chain::ChainedError;
-use futures::{Future, IntoFuture, Stream};
+use futures::{Future, IntoFuture, Sink, Stream};
 use futures::unsync::oneshot;
 use tokio_core::net::TcpStream;
 use tokio_core::reactor::Handle;
@@ -79,8 +79,7 @@ fn shutdown_control_oneshot(data: &SharedData) {
 pub fn serve(handle: &Handle, data: &Rc<SharedData>, tcp: TcpStream, addr: SocketAddr) {
     println!("Incoming control connection from {}", addr);
 
-    // The control connection is never written to.
-    let (_writer, reader) = tcp.framed(LineCodec).split();
+    let (writer, reader) = tcp.framed(LineCodec).split();
 
     let handle_auth = {
         let data = data.clone();
@@ -96,6 +95,11 @@ pub fn serve(handle: &Handle, data: &Rc<SharedData>, tcp: TcpStream, addr: Socke
         let data_ = data.clone();
 
         handle_auth.and_then(move |(reader, rx)| {
+            // Notify the controller they've been authorized.
+            let handle_writer = writer.send("authorized".to_string()).map_err(
+                |err| Error::with_chain(err, "I/O error writing data"),
+            );
+
             let handle_reader = reader.for_each(move |line| {
                                                     forward_to_listeners(&data, line);
                                                     Ok(())
@@ -105,10 +109,12 @@ pub fn serve(handle: &Handle, data: &Rc<SharedData>, tcp: TcpStream, addr: Socke
                                                 result
                                             });
 
+            let handle = handle_writer.and_then(|_| handle_reader);
+
             // Exit if either the connection was closed, or we received a oneshot message
             // indicating there's a new connection and this one should terminate.
             rx.map_err(|_| unreachable!())
-              .select(handle_reader)
+              .select(handle)
               .map(|_| ())
               .map_err(|(err, _)| err)
         })

@@ -1,5 +1,5 @@
 [root]
-name = "network-test"
+name = "network-relay"
 version = "0.1.0"
 dependencies = [
  "bytes 0.4.4 (registry+https://github.com/rust-lang/crates.io-index)",
