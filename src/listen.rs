@@ -21,6 +21,7 @@ where
 {
     inner: S,
     data: Rc<SharedData>,
+    addr: SocketAddr,
     authorized: bool,
 }
 
@@ -28,10 +29,11 @@ impl<S, E> AuthorizeStream<S, E>
 where
     S: Stream<Item = OwnedMessage, Error = E>,
 {
-    fn new(data: Rc<SharedData>, stream: S) -> Self {
+    fn new(data: Rc<SharedData>, addr: SocketAddr, stream: S) -> Self {
         Self {
             inner: stream,
             data,
+            addr,
             authorized: false,
         }
     }
@@ -53,9 +55,15 @@ where
             Ok(Async::Ready(Some(OwnedMessage::Text(message)))) => {
                 if message == self.data.config.listen_password {
                     self.authorized = true;
+
+                    // Kind of a hack.
+                    let listen_connections = self.data.listen_connections.borrow();
+                    let tx = listen_connections.get(&self.addr).unwrap();
+                    Message::ControlPassword(&self.data.control_password.borrow()).send(tx);
+
                     self.inner.poll()
                 } else {
-                    println!("Wrong password.");
+                    println!("Listen connection from {}: wrong password.", self.addr);
                     Ok(Async::Ready(Some(OwnedMessage::Close(None))))
                 }
             }
@@ -79,12 +87,12 @@ fn handle_client(data: &Rc<SharedData>,
                                      unreachable!();
                                  });
 
-    let authorized = AuthorizeStream::new(data.clone(), reader);
+    let authorized = AuthorizeStream::new(data.clone(), addr, reader);
 
     let reader = {
         let data = data.clone();
         authorized.filter_map(move |m| {
-            println!("Listener sent: {:?}", m);
+            println!("Listener {} sent: {:?}", addr, m);
             match m {
                 OwnedMessage::Ping(p) => Some(OwnedMessage::Pong(p)),
                 OwnedMessage::Close(c) => Some(OwnedMessage::Close(c)),
