@@ -89,6 +89,7 @@ pub fn serve(handle: &Handle, data: &Rc<SharedData>, tcp: TcpStream, addr: Socke
             );
 
             let handle_reader = reader.for_each(move |line| {
+                                                    println!("Controller {} sent: {}", addr, line);
                                                     forward_to_listeners(&data, line);
                                                     Ok(())
                                                 })
