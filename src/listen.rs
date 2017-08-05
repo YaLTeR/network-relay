@@ -97,7 +97,7 @@ fn handle_client(data: &Rc<SharedData>,
                 OwnedMessage::Ping(p) => Some(OwnedMessage::Pong(p)),
                 OwnedMessage::Close(c) => Some(OwnedMessage::Close(c)),
                 OwnedMessage::Text(t) => {
-                    forward_to_listeners(&data, t);
+                    forward_to_listeners_except(&data, addr, t);
                     None
                 }
                 _ => None,

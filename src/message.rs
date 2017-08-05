@@ -1,3 +1,5 @@
+use std::net::SocketAddr;
+
 use futures::unsync::mpsc::UnboundedSender;
 
 use shared_data::SharedData;
@@ -31,7 +33,23 @@ pub fn forward_to_listeners(data: &SharedData, line: String) {
         return;
     }
 
-    for tx in data.listen_connections.borrow_mut().values() {
+    for tx in data.listen_connections.borrow().values() {
+        tx.send(line.clone()).unwrap();
+    }
+}
+
+// Forward the line to all listeners, except the one with the passed address.
+pub fn forward_to_listeners_except(data: &SharedData, addr: SocketAddr, line: String) {
+    // Don't forward special messages to prevent abuse.
+    if is_special_message(&line) {
+        return;
+    }
+
+    for (_, tx) in data.listen_connections
+                       .borrow()
+                       .iter()
+                       .filter(|&(&k, _)| k != addr)
+    {
         tx.send(line.clone()).unwrap();
     }
 }
