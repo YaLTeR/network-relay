@@ -4,6 +4,7 @@ use std::net::SocketAddr;
 
 use futures::unsync::mpsc::UnboundedSender;
 use futures::unsync::oneshot;
+use native_tls::TlsAcceptor;
 
 use config::Config;
 
@@ -18,4 +19,7 @@ pub struct SharedData {
 
     // Oneshot sender for terminating the current control connection.
     pub current_control_tx: RefCell<Option<oneshot::Sender<()>>>,
+
+    // A TLS acceptor.
+    pub tls_acceptor: TlsAcceptor,
 }

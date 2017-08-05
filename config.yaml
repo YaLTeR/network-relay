@@ -1,3 +1,5 @@
 listen_password: 1337pass
 listen_port: 12346
 control_port: 12345
+identity_file: identity.pfx
+identity_password: 1337password

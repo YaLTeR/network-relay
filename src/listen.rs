@@ -1,103 +1,163 @@
-use std::io;
 use std::net::SocketAddr;
 use std::rc::Rc;
 
 use error_chain::ChainedError;
-use futures::{Future, IntoFuture, Sink, Stream};
+use futures::{Async, Future, IntoFuture, Poll, Sink, Stream};
 use futures::unsync::mpsc::unbounded;
 use tokio_core::net::TcpStream;
 use tokio_core::reactor::Handle;
-use tokio_io::AsyncRead;
+use tokio_tls::{TlsAcceptorExt, TlsStream};
+use websocket::async::server::{IntoWs, Upgrade};
+use websocket::async::Client;
+use websocket::{OwnedMessage, WebSocketError};
 
 use errors::*;
-use line_codec::LineCodec;
-use message::Message;
+use message::*;
 use shared_data::SharedData;
 
-fn authorize<S>(data: &SharedData,
-                first_line: Option<String>,
-                reader: S)
-                -> impl IntoFuture<Item = S, Error = Error>
+struct AuthorizeStream<S, E>
 where
-    S: Stream<Item = String, Error = Error>,
+    S: Stream<Item = OwnedMessage, Error = E>,
 {
-    if let Some(first_line) = first_line {
-        // Check the password.
-        ensure!(first_line == data.config.listen_password, "wrong password");
-
-        return Ok(reader);
-    }
-
-    bail!("connection closed");
+    inner: S,
+    data: Rc<SharedData>,
+    authorized: bool,
 }
 
-fn handle_listener<T, U>(data: &SharedData,
-                         addr: SocketAddr,
-                         reader: T,
-                         writer: U)
-                         -> impl IntoFuture<Item = (), Error = Error>
+impl<S, E> AuthorizeStream<S, E>
 where
-    T: Stream<Item = String, Error = Error>,
-    U: Sink<SinkItem = String, SinkError = io::Error>,
+    S: Stream<Item = OwnedMessage, Error = E>,
 {
-    let (tx, rx) = unbounded();
+    fn new(data: Rc<SharedData>, stream: S) -> Self {
+        Self {
+            inner: stream,
+            data,
+            authorized: false,
+        }
+    }
+}
 
-    // Send the current control password.
-    Message::ControlPassword(&data.control_password.borrow()).send(&tx);
+impl<S, E> Stream for AuthorizeStream<S, E>
+where
+    S: Stream<Item = OwnedMessage, Error = E>,
+{
+    type Item = OwnedMessage;
+    type Error = E;
 
+    fn poll(&mut self) -> Poll<Option<Self::Item>, Self::Error> {
+        if self.authorized {
+            return self.inner.poll();
+        }
+
+        match self.inner.poll() {
+            Ok(Async::Ready(Some(OwnedMessage::Text(message)))) => {
+                if message == self.data.config.listen_password {
+                    self.authorized = true;
+                    self.inner.poll()
+                } else {
+                    println!("Wrong password.");
+                    Ok(Async::Ready(Some(OwnedMessage::Close(None))))
+                }
+            }
+
+            other => other,
+        }
+    }
+}
+
+fn handle_client(data: &Rc<SharedData>,
+                 addr: SocketAddr,
+                 client: Client<TlsStream<TcpStream>>)
+                 -> impl IntoFuture<Item = (), Error = WebSocketError> {
+    let (writer, reader) = client.split();
+
+    let (tx, rx) = unbounded::<String>();
     data.listen_connections.borrow_mut().insert(addr, tx);
 
-    // The closure return type is needed for the type checker.
-    let rx = rx.map_err(|_| -> io::Error {
-                            unreachable!();
-                        });
+    let rx_messages = rx.map(|s| OwnedMessage::Text(s))
+                        .map_err(|_| -> WebSocketError {
+                                     unreachable!();
+                                 });
 
-    let handle_writer = writer.send_all(rx)
-                              .map(|_| ())
-                              .map_err(|err| Error::with_chain(err, "I/O error writing data"));
+    let authorized = AuthorizeStream::new(data.clone(), reader);
 
-    // Additionally terminate when the connection is closed from the listener.
-    reader.for_each(|_| Ok(()))
-          .map_err(|err| Error::with_chain(err, "I/O error reading data"))
-          .select(handle_writer)
-          .map_err(|(err, _)| err)
-          .map(|_| ())
+    let reader = {
+        let data = data.clone();
+        authorized.filter_map(move |m| {
+            println!("Listener sent: {:?}", m);
+            match m {
+                OwnedMessage::Ping(p) => Some(OwnedMessage::Pong(p)),
+                OwnedMessage::Close(c) => Some(OwnedMessage::Close(c)),
+                OwnedMessage::Text(t) => {
+                    forward_to_listeners(&data, t);
+                    None
+                }
+                _ => None,
+            }
+        })
+    };
+
+    let merged = rx_messages.select(reader);
+
+    let handle_writer = merged.take_while(|m| Ok(!m.is_close()))
+                              .forward(writer)
+                              .and_then(|(_, writer)| writer.send(OwnedMessage::Close(None)));
+
+    let data = data.clone();
+    handle_writer.then(move |x| {
+                           data.listen_connections.borrow_mut().remove(&addr);
+
+                           x.map(|_| ())
+                       })
+}
+
+fn handle_websocket(data: &Rc<SharedData>,
+                    upgrade: Upgrade<TlsStream<TcpStream>>,
+                    addr: SocketAddr)
+                    -> Box<Future<Item = (), Error = Error>> {
+    if !upgrade.protocols().iter().any(|x| x == "rust-websocket") {
+        let handle_conn =
+            upgrade.reject()
+                   .map_err(|err| {
+                                Error::with_chain(err, "I/O error rejecting an invalid connection")
+                            })
+                   .map(move |_| println!("Rejected an invalid listen connection from {}", addr));
+
+        return Box::new(handle_conn);
+    }
+
+    let data = data.clone();
+    let handle_conn = upgrade.use_protocol("rust-websocket")
+                             .accept()
+                             .and_then(move |(client, _)| handle_client(&data, addr, client));
+
+    let handle_conn = handle_conn.map(|_| ()).map_err(|err| {
+        Error::with_chain(err, "Websocket error handling connection")
+    });
+
+    Box::new(handle_conn)
 }
 
 pub fn serve(handle: &Handle, data: &Rc<SharedData>, tcp: TcpStream, addr: SocketAddr) {
     println!("Incoming listen connection from {}", addr);
 
-    let (writer, reader) = tcp.framed(LineCodec).split();
+    let convert_into_tls = data.tls_acceptor
+                               .accept_async(tcp)
+                               .map_err(|err| Error::with_chain(err, "Error accepting TLS"));
 
-    let handle_auth = {
-        let data = data.clone();
+    let convert_into_ws = convert_into_tls.and_then(|stream| {
+        stream.into_ws()
+              .map_err(|(_, _, _, err)| Error::with_chain(err, "Invalid websocket connection"))
+    });
 
-        reader.map_err(|err| Error::with_chain(err, "I/O error reading data"))
-              .into_future()
-              .map_err(|(err, _)| err)
-              .and_then(move |(first_line, reader)| authorize(&data, first_line, reader))
-    };
+    let data = data.clone();
+    let connection =
+        convert_into_ws.and_then(move |upgrade| handle_websocket(&data, upgrade, addr))
+                       .map_err(move |err| {
+                                    println!("Error on listen connection {}: {}",
+                                             addr,
+                                             err.display())
+                                });
 
-    let handle_writer = {
-        let data = data.clone();
-
-        handle_auth.and_then(move |reader| handle_listener(&data, addr, reader, writer))
-    };
-
-    let handle_conn = {
-        let data = data.clone();
-
-        handle_writer.then(move |x| {
-            if let Err(err) = x {
-                println!("Error on listen connection from {}: {}",
-                         addr,
-                         err.display());
-            }
-
-            data.listen_connections.borrow_mut().remove(&addr);
-            Ok(())
-        })
-    };
-
-    handle.spawn(handle_conn);
+    handle.spawn(connection);
 }

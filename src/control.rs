@@ -54,18 +54,6 @@ where
     bail!("connection closed");
 }
 
-// Forward the line to all listeners.
-fn forward_to_listeners(data: &SharedData, line: String) {
-    // Don't forward special messages to prevent abuse.
-    if is_special_message(&line) {
-        return;
-    }
-
-    for tx in data.listen_connections.borrow_mut().values() {
-        tx.send(line.clone()).unwrap();
-    }
-}
-
 // Shut down the current control oneshot cleanly.
 fn shutdown_control_oneshot(data: &SharedData) {
     data.current_control_tx
