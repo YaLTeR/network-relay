@@ -6,7 +6,8 @@ use futures::{Async, Future, IntoFuture, Poll, Sink, Stream};
 use futures::unsync::mpsc::unbounded;
 use tokio_core::net::TcpStream;
 use tokio_core::reactor::Handle;
-use tokio_tls::{TlsAcceptorExt, TlsStream};
+use tokio_io::{AsyncRead, AsyncWrite};
+use tokio_tls::TlsAcceptorExt;
 use websocket::async::server::{IntoWs, Upgrade};
 use websocket::async::Client;
 use websocket::{OwnedMessage, WebSocketError};
@@ -73,10 +74,13 @@ where
     }
 }
 
-fn handle_client(data: &Rc<SharedData>,
-                 addr: SocketAddr,
-                 client: Client<TlsStream<TcpStream>>)
-                 -> impl IntoFuture<Item = (), Error = WebSocketError> {
+fn handle_client<S>(data: &Rc<SharedData>,
+                    addr: SocketAddr,
+                    client: Client<S>)
+                    -> impl IntoFuture<Item = (), Error = WebSocketError>
+where
+    S: AsyncRead + AsyncWrite,
+{
     let (writer, reader) = client.split();
 
     let (tx, rx) = unbounded::<String>();
@@ -119,10 +123,13 @@ fn handle_client(data: &Rc<SharedData>,
                        })
 }
 
-fn handle_websocket(data: &Rc<SharedData>,
-                    upgrade: Upgrade<TlsStream<TcpStream>>,
-                    addr: SocketAddr)
-                    -> Box<Future<Item = (), Error = Error>> {
+fn handle_websocket<S>(data: &Rc<SharedData>,
+                       upgrade: Upgrade<S>,
+                       addr: SocketAddr)
+                       -> Box<Future<Item = (), Error = Error>>
+where
+    S: AsyncRead + AsyncWrite + 'static,
+{
     if !upgrade.protocols().iter().any(|x| x == "rust-websocket") {
         let handle_conn =
             upgrade.reject()
