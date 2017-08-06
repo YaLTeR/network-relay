@@ -26,6 +26,10 @@ fn is_special_message(string: &str) -> bool {
     string.starts_with(CONTROL_PASSWORD)
 }
 
+pub fn is_listener_only_message(string: &str) -> bool {
+    string.starts_with("host ")
+}
+
 // Forward the line to all listeners.
 pub fn forward_to_listeners(data: &SharedData, line: String) {
     // Don't forward special messages to prevent abuse.
