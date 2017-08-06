@@ -64,14 +64,21 @@ fn bind_socket(handle: &Handle, port: u16) -> Result<TcpListener> {
 }
 
 fn set_up_tls_acceptor(config: &Config) -> Result<TlsAcceptor> {
-    let mut file = File::open(&config.identity_file)
-        .chain_err(|| format!("could not open {}", &config.identity_file))?;
+    let identity_file = config.identity_file
+                              .as_ref()
+                              .ok_or("identity_file is abscent from the config")?;
+    let identity_password = config.identity_password
+                                  .as_ref()
+                                  .ok_or("identity_password is abscent from the config")?;
+
+    let mut file = File::open(identity_file)
+        .chain_err(|| format!("could not open {}", identity_file))?;
     let mut pkcs12 = Vec::new();
     file.read_to_end(&mut pkcs12)
-        .chain_err(|| format!("could not read {}", &config.identity_file))?;
+        .chain_err(|| format!("could not read {}", identity_file))?;
 
-    let pkcs12 = Pkcs12::from_der(&pkcs12, &config.identity_password)
-        .chain_err(|| format!("could not parse {}", &config.identity_file))?;
+    let pkcs12 = Pkcs12::from_der(&pkcs12, identity_password)
+        .chain_err(|| format!("could not parse {}", identity_file))?;
     let builder = TlsAcceptor::builder(pkcs12)
         .chain_err(|| "could not make a TlsAcceptorBuilder")?;
     let acceptor = builder.build().chain_err(|| "could not make a TlsAcceptor");
@@ -85,8 +92,12 @@ fn run() -> Result<()> {
     let mut core = Core::new().chain_err(|| "could not create the event loop")?;
     let handle = core.handle();
 
-    let tls_acceptor = set_up_tls_acceptor(&config)
-        .chain_err(|| "could not set up a TLS acceptor")?;
+    let tls_acceptor = if config.listen_tls {
+        Some(set_up_tls_acceptor(&config)
+                 .chain_err(|| "could not set up a TLS acceptor")?)
+    } else {
+        None
+    };
 
     let control_tcp = bind_socket(&handle, config.control_port)
         .chain_err(|| "could not bind the control socket")?;

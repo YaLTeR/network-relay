@@ -21,5 +21,5 @@ pub struct SharedData {
     pub current_control_tx: RefCell<Option<oneshot::Sender<()>>>,
 
     // A TLS acceptor.
-    pub tls_acceptor: TlsAcceptor,
+    pub tls_acceptor: Option<TlsAcceptor>,
 }

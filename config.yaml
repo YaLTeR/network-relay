@@ -1,5 +1,13 @@
 listen_password: 1337pass
 listen_port: 12346
 control_port: 12345
-identity_file: identity.pfx
-identity_password: 1337password
+
+# Set this to true to enable using secure websockets.
+# You will also need to provide an identity file and its password.
+# Search how to create a .pfx or .p12 identity file out of your certificates.
+# For OpenSSL the command looks like this:
+# openssl pkcs12 -export -out identity.pfx -inkey key.pem -in cert.pem -certfile chain_certs.pem
+listen_tls: false
+
+# identity_file: identity.pfx
+# identity_password: 1337password

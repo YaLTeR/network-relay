@@ -3,6 +3,7 @@ use std::rc::Rc;
 
 use error_chain::ChainedError;
 use futures::{Async, Future, IntoFuture, Poll, Sink, Stream};
+use futures::future;
 use futures::unsync::mpsc::unbounded;
 use tokio_core::net::TcpStream;
 use tokio_core::reactor::Handle;
@@ -153,14 +154,12 @@ where
     Box::new(handle_conn)
 }
 
-pub fn serve(handle: &Handle, data: &Rc<SharedData>, tcp: TcpStream, addr: SocketAddr) {
-    println!("Incoming listen connection from {}", addr);
-
-    let convert_into_tls = data.tls_acceptor
-                               .accept_async(tcp)
-                               .map_err(|err| Error::with_chain(err, "Error accepting TLS"));
-
-    let convert_into_ws = convert_into_tls.and_then(|stream| {
+fn serve_stream<F, S>(handle: &Handle, data: &Rc<SharedData>, stream: F, addr: SocketAddr)
+where
+    F: Future<Item = S, Error = Error> + 'static,
+    S: AsyncRead + AsyncWrite + 'static,
+{
+    let convert_into_ws = stream.and_then(|stream| {
         stream.into_ws()
               .map_err(|(_, _, _, err)| Error::with_chain(err, "Invalid websocket connection"))
     });
@@ -175,4 +174,18 @@ pub fn serve(handle: &Handle, data: &Rc<SharedData>, tcp: TcpStream, addr: Socke
                                 });
 
     handle.spawn(connection);
+}
+
+pub fn serve(handle: &Handle, data: &Rc<SharedData>, tcp: TcpStream, addr: SocketAddr) {
+    println!("Incoming listen connection from {}", addr);
+
+    if let Some(tls_acceptor) = data.tls_acceptor.as_ref() {
+        let convert_into_tls = tls_acceptor.accept_async(tcp).map_err(
+            |err| Error::with_chain(err, "Error accepting TLS"),
+        );
+
+        serve_stream(handle, data, convert_into_tls, addr);
+    } else {
+        serve_stream(handle, data, future::ok(tcp), addr);
+    }
 }
