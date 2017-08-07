@@ -1,12 +1,13 @@
 use std::net::SocketAddr;
 use std::rc::Rc;
+use std::time::Duration;
 
 use error_chain::ChainedError;
 use futures::{Async, Future, IntoFuture, Poll, Sink, Stream};
-use futures::future;
+use futures::{future, stream};
 use futures::unsync::mpsc::unbounded;
 use tokio_core::net::TcpStream;
-use tokio_core::reactor::Handle;
+use tokio_core::reactor::{Handle, Timeout};
 use tokio_io::{AsyncRead, AsyncWrite};
 use tokio_tls::TlsAcceptorExt;
 use websocket::async::server::{IntoWs, Upgrade};
@@ -75,7 +76,8 @@ where
     }
 }
 
-fn handle_client<S>(data: &Rc<SharedData>,
+fn handle_client<S>(handle: &Handle,
+                    data: &Rc<SharedData>,
                     addr: SocketAddr,
                     client: Client<S>)
                     -> impl IntoFuture<Item = (), Error = WebSocketError>
@@ -92,25 +94,30 @@ where
                                      unreachable!();
                                  });
 
+    let handle = handle.clone();
+    let pings = stream::repeat(())
+        .and_then(move |_| Timeout::new(Duration::from_secs(10), &handle))
+        .and_then(|x| x)
+        .map(|_| OwnedMessage::Ping(vec![]))
+        .map_err(|err| WebSocketError::from(err));
+
     let authorized = AuthorizeStream::new(data.clone(), addr, reader);
 
     let reader = {
         let data = data.clone();
-        authorized.filter_map(move |m| {
-            println!("Listener {} sent: {:?}", addr, m);
-            match m {
-                OwnedMessage::Ping(p) => Some(OwnedMessage::Pong(p)),
-                OwnedMessage::Close(c) => Some(OwnedMessage::Close(c)),
-                OwnedMessage::Text(t) => {
-                    forward_to_listeners_except(&data, addr, t);
-                    None
-                }
-                _ => None,
-            }
-        })
+        authorized.filter_map(move |m| match m {
+                                  OwnedMessage::Ping(p) => Some(OwnedMessage::Pong(p)),
+                                  OwnedMessage::Close(c) => Some(OwnedMessage::Close(c)),
+                                  OwnedMessage::Text(t) => {
+                                      println!("Listener {} sent: {:?}", addr, t);
+                                      forward_to_listeners_except(&data, addr, t);
+                                      None
+                                  }
+                                  _ => None,
+                              })
     };
 
-    let merged = rx_messages.select(reader);
+    let merged = pings.select(rx_messages).select(reader);
 
     let handle_writer = merged.take_while(|m| Ok(!m.is_close()))
                               .forward(writer)
@@ -124,7 +131,8 @@ where
                        })
 }
 
-fn handle_websocket<S>(data: &Rc<SharedData>,
+fn handle_websocket<S>(handle: &Handle,
+                       data: &Rc<SharedData>,
                        upgrade: Upgrade<S>,
                        addr: SocketAddr)
                        -> Box<Future<Item = (), Error = Error>>
@@ -143,9 +151,11 @@ where
     }
 
     let data = data.clone();
-    let handle_conn = upgrade.use_protocol("rust-websocket")
-                             .accept()
-                             .and_then(move |(client, _)| handle_client(&data, addr, client));
+    let handle = handle.clone();
+    let handle_conn =
+        upgrade.use_protocol("rust-websocket")
+               .accept()
+               .and_then(move |(client, _)| handle_client(&handle, &data, addr, client));
 
     let handle_conn = handle_conn.map(|_| ()).map_err(|err| {
         Error::with_chain(err, "Websocket error handling connection")
@@ -164,14 +174,16 @@ where
               .map_err(|(_, _, _, err)| Error::with_chain(err, "Invalid websocket connection"))
     });
 
-    let data = data.clone();
-    let connection =
-        convert_into_ws.and_then(move |upgrade| handle_websocket(&data, upgrade, addr))
+    let connection = {
+        let data = data.clone();
+        let handle = handle.clone();
+        convert_into_ws.and_then(move |upgrade| handle_websocket(&handle, &data, upgrade, addr))
                        .map_err(move |err| {
                                     println!("Error on listen connection {}: {}",
                                              addr,
                                              err.display())
-                                });
+                                })
+    };
 
     handle.spawn(connection);
 }
