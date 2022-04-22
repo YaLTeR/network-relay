@@ -137,7 +137,7 @@ fn handle_websocket<S>(handle: &Handle,
                        addr: SocketAddr)
                        -> Box<Future<Item = (), Error = Error>>
 where
-    S: AsyncRead + AsyncWrite + 'static,
+    S: AsyncRead + AsyncWrite + Send + 'static,
 {
     if !upgrade.protocols().iter().any(|x| x == "rust-websocket") {
         let handle_conn =
@@ -167,7 +167,7 @@ where
 fn serve_stream<F, S>(handle: &Handle, data: &Rc<SharedData>, stream: F, addr: SocketAddr)
 where
     F: Future<Item = S, Error = Error> + 'static,
-    S: AsyncRead + AsyncWrite + 'static,
+    S: AsyncRead + AsyncWrite + Send + 'static,
 {
     let convert_into_ws = stream.and_then(|stream| {
         stream.into_ws()
